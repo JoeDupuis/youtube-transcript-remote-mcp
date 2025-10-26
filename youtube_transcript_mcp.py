@@ -39,7 +39,7 @@ AUTHORIZED_EMAILS = [email.strip() for email in AUTHORIZED_EMAILS if email.strip
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
-CHARACTER_LIMIT = 10000  # Temporary: reduced for testing pagination
+CHARACTER_LIMIT = 25000
 
 class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]):
 
