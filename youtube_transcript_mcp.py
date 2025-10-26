@@ -48,6 +48,7 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
         self.clients: dict[str, OAuthClientInformationFull] = {}
         self.auth_codes: dict[str, AuthorizationCode] = {}
         self.tokens: dict[str, AccessToken] = {}
+        self.refresh_tokens: dict[str, RefreshToken] = {}
         self.state_mapping: dict[str, dict] = {}
         self.user_emails: dict[str, str] = {}
 
@@ -149,15 +150,27 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
             raise ValueError("Invalid authorization code")
 
         mcp_token = f"mcp_{secrets.token_hex(32)}"
+        mcp_refresh_token = f"mcp_refresh_{secrets.token_hex(32)}"
 
         email = self.user_emails.get(authorization_code.code, "unknown")
 
+        # Create access token
         self.tokens[mcp_token] = AccessToken(
             token=mcp_token,
             client_id=client.client_id,
             subject=email,
             scopes=authorization_code.scopes,
             expires_at=int(time.time()) + 3600,
+            resource=authorization_code.resource,
+        )
+
+        # Create refresh token (never expires for simplicity)
+        self.refresh_tokens[mcp_refresh_token] = RefreshToken(
+            token=mcp_refresh_token,
+            client_id=client.client_id,
+            subject=email,
+            scopes=authorization_code.scopes,
+            expires_at=None,  # Refresh tokens don't expire
             resource=authorization_code.resource,
         )
 
@@ -168,6 +181,7 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
             token_type="Bearer",
             expires_in=3600,
             scope=" ".join(authorization_code.scopes),
+            refresh_token=mcp_refresh_token,
         )
 
     async def load_access_token(self, token: str) -> Optional[AccessToken]:
@@ -182,7 +196,20 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
         return access_token
 
     async def load_refresh_token(self, client: OAuthClientInformationFull, refresh_token: str) -> Optional[RefreshToken]:
-        return None
+        token = self.refresh_tokens.get(refresh_token)
+        if not token:
+            return None
+
+        # Verify the token belongs to the requesting client
+        if token.client_id != client.client_id:
+            return None
+
+        # Check if token is expired (if it has an expiration)
+        if token.expires_at and token.expires_at < time.time():
+            del self.refresh_tokens[refresh_token]
+            return None
+
+        return token
 
     async def exchange_refresh_token(
         self,
@@ -190,11 +217,37 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        raise NotImplementedError("Refresh tokens not supported")
+        # Verify the refresh token is still valid
+        if refresh_token.token not in self.refresh_tokens:
+            raise ValueError("Invalid refresh token")
+
+        # Create a new access token
+        new_access_token = f"mcp_{secrets.token_hex(32)}"
+
+        self.tokens[new_access_token] = AccessToken(
+            token=new_access_token,
+            client_id=client.client_id,
+            subject=refresh_token.subject,
+            scopes=refresh_token.scopes,
+            expires_at=int(time.time()) + 3600,
+            resource=refresh_token.resource,
+        )
+
+        return OAuthToken(
+            access_token=new_access_token,
+            token_type="Bearer",
+            expires_in=3600,
+            scope=" ".join(refresh_token.scopes),
+            refresh_token=refresh_token.token,  # Return the same refresh token
+        )
 
     async def revoke_token(self, token: str, token_type_hint: Optional[str] = None) -> None:
+        # Remove from access tokens
         if token in self.tokens:
             del self.tokens[token]
+        # Remove from refresh tokens
+        if token in self.refresh_tokens:
+            del self.refresh_tokens[token]
 
 def _extract_video_id(video_input: str) -> str:
     video_input = video_input.strip()
