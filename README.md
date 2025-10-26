@@ -99,21 +99,35 @@ Fetches the transcript for a YouTube video.
 **Parameters:**
 - `video_input` (string, required): YouTube video ID or full URL
   - Examples: `dQw4w9WgXcQ` or `https://youtube.com/watch?v=dQw4w9WgXcQ`
-- `include_timestamps` (boolean, optional, default: true): Include [MM:SS] timestamps
-- `allow_auto_generated` (boolean, optional, default: true): Fall back to auto-generated if manual transcript unavailable
-- `auth_token` (string, required): Google OAuth 2.0 ID token
+- `cursor` (integer, optional, default: 0): Starting segment index for pagination
 
-**Returns:** Markdown-formatted transcript with optional timestamps
+**Returns:** Markdown-formatted transcript with timestamps
 
-**Example:**
+**How Pagination Works:**
+- The tool automatically fits as many segments as possible within the MCP response size limit (25,000 characters)
+- If the transcript is too long, it returns a chunk and tells you there's more
+- Use the `cursor` parameter from the response to fetch the next chunk
+
+**Example (start from beginning):**
+```json
+{
+  "video_input": "dQw4w9WgXcQ"
+}
+```
+
+**Example (fetch next page):**
 ```json
 {
   "video_input": "dQw4w9WgXcQ",
-  "include_timestamps": true,
-  "allow_auto_generated": true,
-  "auth_token": "your-google-oauth-token"
+  "cursor": 250
 }
 ```
+
+**Response Format:**
+When the transcript is paginated, the response includes:
+- `Showing segments X-Y of Z`: Current page range
+- `Has more`: Whether there are more segments to fetch
+- `Next cursor`: Value to use for fetching the next batch (only if has_more is true)
 
 ### 2. `youtube_list_available_transcripts`
 
@@ -173,9 +187,9 @@ The server provides clear error messages for common issues:
 ## Limitations
 
 - Currently only supports English transcripts
-- Maximum response size limited to 25,000 characters (automatically truncated with notice)
 - Requires internet connection to fetch transcripts and validate tokens
 - Subject to YouTube's rate limits and availability
+- Very long transcripts should use pagination to stay within MCP response size limits
 
 ## License
 

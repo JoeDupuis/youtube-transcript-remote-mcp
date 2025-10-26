@@ -299,21 +299,12 @@ def _extract_video_id(video_input: str) -> str:
 
     raise ValueError(f"Could not extract valid YouTube video ID from: {video_input}")
 
-def _format_transcript_markdown(transcript_data: List[dict], video_id: str, include_timestamps: bool) -> str:
-    lines = [f"# YouTube Transcript: {video_id}", ""]
-
-    if include_timestamps:
-        for entry in transcript_data:
-            timestamp_seconds = int(entry['start'])
-            minutes = timestamp_seconds // 60
-            seconds = timestamp_seconds % 60
-            timestamp = f"[{minutes:02d}:{seconds:02d}]"
-            lines.append(f"{timestamp} {entry['text']}")
-    else:
-        for entry in transcript_data:
-            lines.append(entry['text'])
-
-    return "\n".join(lines)
+def _format_segment(entry: dict) -> str:
+    """Format a single transcript segment with timestamp."""
+    timestamp_seconds = int(entry['start'])
+    minutes = timestamp_seconds // 60
+    seconds = timestamp_seconds % 60
+    return f"[{minutes:02d}:{seconds:02d}] {entry['text']}"
 
 def _handle_transcript_error(e: Exception, video_id: str) -> str:
     if isinstance(e, TranscriptsDisabled):
@@ -362,11 +353,17 @@ async def google_callback_handler(request: Request) -> Response:
         "openWorldHint": True
     }
 )
-async def youtube_get_transcript(video_input: str) -> str:
-    """Get YouTube video transcript. Just paste the video URL or ID.
+async def youtube_get_transcript(
+    video_input: str,
+    cursor: int = 0
+) -> str:
+    """Get YouTube video transcript. Pass the video URL or ID.
+
+    The output is paginated and will require multiple calls to fetch the whole transcript.
 
     Args:
         video_input: YouTube URL or video ID
+        cursor: Starting segment index for pagination (default: 0)
     """
     try:
         video_id = _extract_video_id(video_input)
@@ -384,15 +381,53 @@ async def youtube_get_transcript(video_input: str) -> str:
 
         fetched = transcript.fetch()
         transcript_data = fetched.to_raw_data()
+        total_segments = len(transcript_data)
 
-        result = _format_transcript_markdown(transcript_data, video_id, True)
+        # Validate cursor
+        if cursor < 0:
+            cursor = 0
+        if cursor >= total_segments:
+            return f"Error: Cursor {cursor} is beyond the end of transcript (total segments: {total_segments})"
 
-        if len(result) > CHARACTER_LIMIT:
-            truncated_ratio = CHARACTER_LIMIT / len(result)
-            truncated_count = int(len(transcript_data) * truncated_ratio)
-            truncated_data = transcript_data[:truncated_count]
-            result = _format_transcript_markdown(truncated_data, video_id, True)
-            result += f"\n\n⚠️ **Transcript truncated**: Showing {truncated_count}/{len(transcript_data)} segments due to length limits."
+        # Build result by appending segments until we're close to the limit
+        remaining_data = transcript_data[cursor:]
+
+        # Reserve space for pagination metadata
+        metadata_overhead = 150
+
+        # Start with header
+        result_lines = [f"# YouTube Transcript: {video_id}", ""]
+        current_size = len("\n".join(result_lines)) + 1  # +1 for final newline
+
+        # Add segments until we're close to the limit
+        segments_added = 0
+        for entry in remaining_data:
+            # Format this segment
+            segment_text = _format_segment(entry)
+            segment_size = len(segment_text) + 1  # +1 for newline
+
+            # Check if adding this segment would exceed the limit
+            if current_size + segment_size + metadata_overhead > CHARACTER_LIMIT:
+                # Only stop if we've added at least one segment
+                if segments_added > 0:
+                    break
+
+            result_lines.append(segment_text)
+            current_size += segment_size
+            segments_added += 1
+
+        # Build final result
+        result = "\n".join(result_lines)
+
+        # Add metadata
+        end_index = cursor + segments_added
+        has_more = end_index < total_segments
+
+        result += f"\n\n---\n**Pagination Info:**\n"
+        result += f"- Showing segments {cursor + 1}-{end_index} of {total_segments}\n"
+        result += f"- Has more: {has_more}\n"
+        if has_more:
+            result += f"- Next cursor: {end_index}\n"
 
         return result
 
