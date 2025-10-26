@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  youtube-transcript-mcp:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - SERVER_URL=${SERVER_URL}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - AUTHORIZED_EMAILS=${AUTHORIZED_EMAILS}
+    env_file:
+      - .env
+    restart: unless-stopped

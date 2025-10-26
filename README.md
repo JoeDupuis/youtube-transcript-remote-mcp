@@ -59,6 +59,25 @@ AUTHORIZED_EMAILS=user1@gmail.com,user2@example.com
 
 ## Running the Server
 
+### Option 1: Docker (Recommended)
+
+1. Build and run with docker-compose:
+
+```bash
+docker-compose up -d
+```
+
+2. Or build and run manually:
+
+```bash
+docker build -t youtube-transcript-mcp .
+docker run -p 8000:8000 --env-file .env youtube-transcript-mcp
+```
+
+The server will be available at: `http://localhost:8000/sse`
+
+### Option 2: Direct Python
+
 The server runs with SSE (Server-Sent Events) transport on port 8000 by default:
 
 ```bash
