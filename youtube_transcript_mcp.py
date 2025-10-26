@@ -47,19 +47,7 @@ CHARACTER_LIMIT = 25000
 async def init_database(db_path: str = "oauth_tokens.db"):
     """Initialize the SQLite database with required tables."""
     async with aiosqlite.connect(db_path) as db:
-        # Create access_tokens table
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS access_tokens (
-                token TEXT PRIMARY KEY,
-                client_id TEXT NOT NULL,
-                subject TEXT NOT NULL,
-                scopes TEXT NOT NULL,
-                expires_at INTEGER NOT NULL,
-                resource TEXT
-            )
-        """)
-
-        # Create refresh_tokens table
+        # Create refresh_tokens table first (referenced by access_tokens)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS refresh_tokens (
                 token TEXT PRIMARY KEY,
@@ -71,13 +59,17 @@ async def init_database(db_path: str = "oauth_tokens.db"):
             )
         """)
 
-        # Create refresh_to_access mapping table
+        # Create access_tokens table with foreign key to refresh_tokens
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS refresh_to_access (
-                refresh_token TEXT PRIMARY KEY,
-                access_token TEXT NOT NULL,
-                FOREIGN KEY (refresh_token) REFERENCES refresh_tokens(token) ON DELETE CASCADE,
-                FOREIGN KEY (access_token) REFERENCES access_tokens(token) ON DELETE CASCADE
+            CREATE TABLE IF NOT EXISTS access_tokens (
+                token TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                resource TEXT,
+                refresh_token TEXT,
+                FOREIGN KEY (refresh_token) REFERENCES refresh_tokens(token) ON DELETE CASCADE
             )
         """)
 
@@ -89,7 +81,7 @@ async def init_database(db_path: str = "oauth_tokens.db"):
             )
         """)
 
-        # Create index for faster token lookups
+        # Create indexes for faster token lookups
         await db.execute("CREATE INDEX IF NOT EXISTS idx_access_tokens_expires ON access_tokens(expires_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires ON refresh_tokens(expires_at)")
 
@@ -223,16 +215,7 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
 
         # Create tokens in database
         async with aiosqlite.connect(self.db_path) as db:
-            # Create access token
-            expires_at = int(time.time()) + 3600
-            await db.execute(
-                """INSERT INTO access_tokens (token, client_id, subject, scopes, expires_at, resource)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (mcp_token, client.client_id, email, json.dumps(authorization_code.scopes),
-                 expires_at, authorization_code.resource)
-            )
-
-            # Create refresh token (expires in 90 days for security)
+            # Create refresh token first (expires in 90 days for security)
             refresh_token_expiry = int(time.time()) + (90 * 24 * 3600)  # 90 days
             await db.execute(
                 """INSERT INTO refresh_tokens (token, client_id, subject, scopes, expires_at, resource)
@@ -241,10 +224,13 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
                  refresh_token_expiry, authorization_code.resource)
             )
 
-            # Track the mapping for token rotation
+            # Create access token with reference to refresh token
+            expires_at = int(time.time()) + 3600
             await db.execute(
-                "INSERT INTO refresh_to_access (refresh_token, access_token) VALUES (?, ?)",
-                (mcp_refresh_token, mcp_token)
+                """INSERT INTO access_tokens (token, client_id, subject, scopes, expires_at, resource, refresh_token)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (mcp_token, client.client_id, email, json.dumps(authorization_code.scopes),
+                 expires_at, authorization_code.resource, mcp_refresh_token)
             )
 
             await db.commit()
@@ -334,28 +320,15 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
                 if not await cursor.fetchone():
                     raise ValueError("Invalid refresh token")
 
-            # SECURITY: Invalidate the old access token immediately
-            async with db.execute(
-                "SELECT access_token FROM refresh_to_access WHERE refresh_token = ?",
-                (refresh_token.token,)
-            ) as cursor:
-                row = await cursor.fetchone()
-                if row:
-                    old_access_token = row[0]
-                    await db.execute("DELETE FROM access_tokens WHERE token = ?", (old_access_token,))
-
-            # Create a new access token
-            new_access_token = f"mcp_{secrets.token_hex(32)}"
-            expires_at = int(time.time()) + 3600
+            # SECURITY: Invalidate any old access tokens associated with this refresh token
+            # This will automatically happen when we delete the old refresh token due to CASCADE
             await db.execute(
-                """INSERT INTO access_tokens (token, client_id, subject, scopes, expires_at, resource)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (new_access_token, client.client_id, refresh_token.subject,
-                 json.dumps(refresh_token.scopes), expires_at, refresh_token.resource)
+                "DELETE FROM access_tokens WHERE refresh_token = ?",
+                (refresh_token.token,)
             )
 
             # SECURITY: Implement refresh token rotation
-            # Create a new refresh token and invalidate the old one
+            # Create a new refresh token first
             new_refresh_token = f"mcp_refresh_{secrets.token_hex(32)}"
             refresh_token_expiry = int(time.time()) + (90 * 24 * 3600)  # 90 days
 
@@ -366,15 +339,18 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
                  json.dumps(refresh_token.scopes), refresh_token_expiry, refresh_token.resource)
             )
 
-            # Update the mapping to the new tokens
+            # Create a new access token associated with the new refresh token
+            new_access_token = f"mcp_{secrets.token_hex(32)}"
+            expires_at = int(time.time()) + 3600
             await db.execute(
-                "INSERT INTO refresh_to_access (refresh_token, access_token) VALUES (?, ?)",
-                (new_refresh_token, new_access_token)
+                """INSERT INTO access_tokens (token, client_id, subject, scopes, expires_at, resource, refresh_token)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (new_access_token, client.client_id, refresh_token.subject,
+                 json.dumps(refresh_token.scopes), expires_at, refresh_token.resource, new_refresh_token)
             )
 
-            # Invalidate the old refresh token
+            # Invalidate the old refresh token (and any remaining access tokens via CASCADE)
             await db.execute("DELETE FROM refresh_tokens WHERE token = ?", (refresh_token.token,))
-            await db.execute("DELETE FROM refresh_to_access WHERE refresh_token = ?", (refresh_token.token,))
 
             await db.commit()
 
@@ -391,9 +367,8 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
             # Remove from access tokens
             await db.execute("DELETE FROM access_tokens WHERE token = ?", (token,))
 
-            # Remove from refresh tokens and clean up mappings
+            # Remove from refresh tokens (CASCADE will delete associated access tokens)
             await db.execute("DELETE FROM refresh_tokens WHERE token = ?", (token,))
-            await db.execute("DELETE FROM refresh_to_access WHERE refresh_token = ?", (token,))
 
             await db.commit()
 
