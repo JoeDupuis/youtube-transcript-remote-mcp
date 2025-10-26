@@ -39,6 +39,9 @@ AUTHORIZED_EMAILS = [email.strip() for email in AUTHORIZED_EMAILS if email.strip
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
+# MCP response size limit
+CHARACTER_LIMIT = 25000
+
 class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]):
 
     def __init__(self, server_url: str):
@@ -362,15 +365,15 @@ async def google_callback_handler(request: Request) -> Response:
 )
 async def youtube_get_transcript(
     video_input: str,
-    cursor: int = 0,
-    page_size: int | None = None
+    cursor: int = 0
 ) -> str:
     """Get YouTube video transcript. Just paste the video URL or ID.
+
+    Automatically paginates if transcript exceeds MCP response size limits.
 
     Args:
         video_input: YouTube URL or video ID
         cursor: Starting segment index for pagination (default: 0)
-        page_size: Number of segments to return per page (default: None = all segments)
     """
     try:
         video_id = _extract_video_id(video_input)
@@ -390,33 +393,56 @@ async def youtube_get_transcript(
         transcript_data = fetched.to_raw_data()
         total_segments = len(transcript_data)
 
-        # Apply pagination if page_size is specified
-        if page_size is not None:
-            # Validate cursor
-            if cursor < 0:
-                cursor = 0
-            if cursor >= total_segments:
-                return f"Error: Cursor {cursor} is beyond the end of transcript (total segments: {total_segments})"
+        # Validate cursor
+        if cursor < 0:
+            cursor = 0
+        if cursor >= total_segments:
+            return f"Error: Cursor {cursor} is beyond the end of transcript (total segments: {total_segments})"
 
-            # Calculate the slice
-            end_index = min(cursor + page_size, total_segments)
-            paginated_data = transcript_data[cursor:end_index]
-            has_more = end_index < total_segments
-            next_cursor = end_index if has_more else None
+        # Try to fit as many segments as possible within CHARACTER_LIMIT
+        # Start with all remaining segments and progressively reduce if needed
+        remaining_data = transcript_data[cursor:]
 
-            # Format the paginated transcript
-            result = _format_transcript_markdown(paginated_data, video_id, True)
+        # First try with all remaining segments
+        result = _format_transcript_markdown(remaining_data, video_id, True)
 
-            # Add pagination metadata
-            result += f"\n\n---\n**Pagination Info:**\n"
-            result += f"- Showing segments {cursor + 1}-{end_index} of {total_segments}\n"
-            result += f"- Has more: {has_more}\n"
-            if has_more:
-                result += f"- Next cursor: {next_cursor}\n"
-        else:
-            # Return full transcript if no pagination
-            result = _format_transcript_markdown(transcript_data, video_id, True)
+        # If it fits, we're done
+        if len(result) <= CHARACTER_LIMIT:
             result += f"\n\n---\n**Total segments:** {total_segments}"
+            if cursor > 0:
+                result += f" (showing segments {cursor + 1}-{total_segments})"
+            return result
+
+        # Otherwise, find how many segments fit
+        # Use binary search for efficiency
+        left, right = 1, len(remaining_data)
+        best_count = 1
+
+        while left <= right:
+            mid = (left + right) // 2
+            test_data = remaining_data[:mid]
+            test_result = _format_transcript_markdown(test_data, video_id, True)
+
+            # Reserve space for pagination metadata (~150 chars)
+            if len(test_result) + 150 <= CHARACTER_LIMIT:
+                best_count = mid
+                left = mid + 1
+            else:
+                right = mid - 1
+
+        # Build final result with best_count segments
+        paginated_data = remaining_data[:best_count]
+        result = _format_transcript_markdown(paginated_data, video_id, True)
+
+        # Add pagination metadata
+        end_index = cursor + best_count
+        has_more = end_index < total_segments
+
+        result += f"\n\n---\n**Pagination Info:**\n"
+        result += f"- Showing segments {cursor + 1}-{end_index} of {total_segments}\n"
+        result += f"- Has more: {has_more}\n"
+        if has_more:
+            result += f"- Next cursor: {end_index}\n"
 
         return result
 

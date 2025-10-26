@@ -94,39 +94,40 @@ For MCP Inspector or other MCP clients, use:
 
 ### 1. `youtube_get_transcript`
 
-Fetches the transcript for a YouTube video with optional pagination support.
+Fetches the transcript for a YouTube video with automatic pagination.
 
 **Parameters:**
 - `video_input` (string, required): YouTube video ID or full URL
   - Examples: `dQw4w9WgXcQ` or `https://youtube.com/watch?v=dQw4w9WgXcQ`
 - `cursor` (integer, optional, default: 0): Starting segment index for pagination
-- `page_size` (integer, optional, default: null): Number of segments to return per page
-  - If not specified, returns the entire transcript
-  - Useful for handling very long transcripts within MCP response size limits
 
-**Returns:** Markdown-formatted transcript with timestamps and pagination metadata
+**Returns:** Markdown-formatted transcript with timestamps and automatic pagination
 
-**Example (full transcript):**
+**How Pagination Works:**
+- The tool automatically fits as many segments as possible within the MCP response size limit (25,000 characters)
+- If the transcript is too long, it returns a chunk and tells you there's more
+- Use the `cursor` parameter from the response to fetch the next chunk
+
+**Example (start from beginning):**
 ```json
 {
   "video_input": "dQw4w9WgXcQ"
 }
 ```
 
-**Example (paginated):**
+**Example (fetch next page):**
 ```json
 {
   "video_input": "dQw4w9WgXcQ",
-  "cursor": 0,
-  "page_size": 100
+  "cursor": 250
 }
 ```
 
-**Pagination Response Format:**
-The response includes pagination metadata:
+**Response Format:**
+When the transcript is paginated, the response includes:
 - `Showing segments X-Y of Z`: Current page range
 - `Has more`: Whether there are more segments to fetch
-- `Next cursor`: Value to use for the next page (if has_more is true)
+- `Next cursor`: Value to use for fetching the next batch (only if has_more is true)
 
 ### 2. `youtube_list_available_transcripts`
 
