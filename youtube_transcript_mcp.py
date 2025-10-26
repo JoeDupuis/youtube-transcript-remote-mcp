@@ -5,6 +5,9 @@ import os
 import re
 import secrets
 import time
+import json
+import asyncio
+import aiosqlite
 from dotenv import load_dotenv
 from pydantic import AnyHttpUrl
 from mcp.server.fastmcp import FastMCP
@@ -41,24 +44,86 @@ GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
 CHARACTER_LIMIT = 25000
 
+async def init_database(db_path: str = "oauth_tokens.db"):
+    """Initialize the SQLite database with required tables."""
+    async with aiosqlite.connect(db_path) as db:
+        # Create access_tokens table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS access_tokens (
+                token TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                resource TEXT
+            )
+        """)
+
+        # Create refresh_tokens table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                token TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                resource TEXT
+            )
+        """)
+
+        # Create refresh_to_access mapping table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS refresh_to_access (
+                refresh_token TEXT PRIMARY KEY,
+                access_token TEXT NOT NULL,
+                FOREIGN KEY (refresh_token) REFERENCES refresh_tokens(token) ON DELETE CASCADE,
+                FOREIGN KEY (access_token) REFERENCES access_tokens(token) ON DELETE CASCADE
+            )
+        """)
+
+        # Create clients table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS clients (
+                client_id TEXT PRIMARY KEY,
+                client_data TEXT NOT NULL
+            )
+        """)
+
+        # Create index for faster token lookups
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_access_tokens_expires ON access_tokens(expires_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires ON refresh_tokens(expires_at)")
+
+        await db.commit()
+
 class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]):
 
-    def __init__(self, server_url: str):
+    def __init__(self, server_url: str, db_path: str = "oauth_tokens.db"):
         self.server_url = server_url
-        self.clients: dict[str, OAuthClientInformationFull] = {}
+        self.db_path = db_path
+        # Keep short-lived data in memory
         self.auth_codes: dict[str, AuthorizationCode] = {}
-        self.tokens: dict[str, AccessToken] = {}
-        self.refresh_tokens: dict[str, RefreshToken] = {}
-        # Map refresh tokens to their associated access tokens for invalidation
-        self.refresh_to_access: dict[str, str] = {}
         self.state_mapping: dict[str, dict] = {}
         self.user_emails: dict[str, str] = {}
 
     async def get_client(self, client_id: str) -> Optional[OAuthClientInformationFull]:
-        return self.clients.get(client_id)
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT client_data FROM clients WHERE client_id = ?",
+                (client_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    client_data = json.loads(row[0])
+                    return OAuthClientInformationFull(**client_data)
+                return None
 
     async def register_client(self, client_info: OAuthClientInformationFull):
-        self.clients[client_info.client_id] = client_info
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO clients (client_id, client_data) VALUES (?, ?)",
+                (client_info.client_id, json.dumps(client_info.model_dump()))
+            )
+            await db.commit()
 
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
         state = params.state or secrets.token_hex(16)
@@ -156,29 +221,33 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
 
         email = self.user_emails.get(authorization_code.code, "unknown")
 
-        # Create access token
-        self.tokens[mcp_token] = AccessToken(
-            token=mcp_token,
-            client_id=client.client_id,
-            subject=email,
-            scopes=authorization_code.scopes,
-            expires_at=int(time.time()) + 3600,
-            resource=authorization_code.resource,
-        )
+        # Create tokens in database
+        async with aiosqlite.connect(self.db_path) as db:
+            # Create access token
+            expires_at = int(time.time()) + 3600
+            await db.execute(
+                """INSERT INTO access_tokens (token, client_id, subject, scopes, expires_at, resource)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (mcp_token, client.client_id, email, json.dumps(authorization_code.scopes),
+                 expires_at, authorization_code.resource)
+            )
 
-        # Create refresh token (expires in 90 days for security)
-        refresh_token_expiry = int(time.time()) + (90 * 24 * 3600)  # 90 days
-        self.refresh_tokens[mcp_refresh_token] = RefreshToken(
-            token=mcp_refresh_token,
-            client_id=client.client_id,
-            subject=email,
-            scopes=authorization_code.scopes,
-            expires_at=refresh_token_expiry,
-            resource=authorization_code.resource,
-        )
+            # Create refresh token (expires in 90 days for security)
+            refresh_token_expiry = int(time.time()) + (90 * 24 * 3600)  # 90 days
+            await db.execute(
+                """INSERT INTO refresh_tokens (token, client_id, subject, scopes, expires_at, resource)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (mcp_refresh_token, client.client_id, email, json.dumps(authorization_code.scopes),
+                 refresh_token_expiry, authorization_code.resource)
+            )
 
-        # Track the mapping for token rotation
-        self.refresh_to_access[mcp_refresh_token] = mcp_token
+            # Track the mapping for token rotation
+            await db.execute(
+                "INSERT INTO refresh_to_access (refresh_token, access_token) VALUES (?, ?)",
+                (mcp_refresh_token, mcp_token)
+            )
+
+            await db.commit()
 
         del self.auth_codes[authorization_code.code]
 
@@ -191,31 +260,64 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
         )
 
     async def load_access_token(self, token: str) -> Optional[AccessToken]:
-        access_token = self.tokens.get(token)
-        if not access_token:
-            return None
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """SELECT token, client_id, subject, scopes, expires_at, resource
+                   FROM access_tokens WHERE token = ?""",
+                (token,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
 
-        if access_token.expires_at and access_token.expires_at < time.time():
-            del self.tokens[token]
-            return None
+                token_str, client_id, subject, scopes_json, expires_at, resource = row
 
-        return access_token
+                # Check if token is expired
+                if expires_at and expires_at < time.time():
+                    await db.execute("DELETE FROM access_tokens WHERE token = ?", (token,))
+                    await db.commit()
+                    return None
+
+                return AccessToken(
+                    token=token_str,
+                    client_id=client_id,
+                    subject=subject,
+                    scopes=json.loads(scopes_json),
+                    expires_at=expires_at,
+                    resource=resource,
+                )
 
     async def load_refresh_token(self, client: OAuthClientInformationFull, refresh_token: str) -> Optional[RefreshToken]:
-        token = self.refresh_tokens.get(refresh_token)
-        if not token:
-            return None
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """SELECT token, client_id, subject, scopes, expires_at, resource
+                   FROM refresh_tokens WHERE token = ?""",
+                (refresh_token,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
 
-        # Verify the token belongs to the requesting client
-        if token.client_id != client.client_id:
-            return None
+                token_str, client_id, subject, scopes_json, expires_at, resource = row
 
-        # Check if token is expired (if it has an expiration)
-        if token.expires_at and token.expires_at < time.time():
-            del self.refresh_tokens[refresh_token]
-            return None
+                # Verify the token belongs to the requesting client
+                if client_id != client.client_id:
+                    return None
 
-        return token
+                # Check if token is expired
+                if expires_at and expires_at < time.time():
+                    await db.execute("DELETE FROM refresh_tokens WHERE token = ?", (refresh_token,))
+                    await db.commit()
+                    return None
+
+                return RefreshToken(
+                    token=token_str,
+                    client_id=client_id,
+                    subject=subject,
+                    scopes=json.loads(scopes_json),
+                    expires_at=expires_at,
+                    resource=resource,
+                )
 
     async def exchange_refresh_token(
         self,
@@ -223,47 +325,58 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        # Verify the refresh token is still valid
-        if refresh_token.token not in self.refresh_tokens:
-            raise ValueError("Invalid refresh token")
+        async with aiosqlite.connect(self.db_path) as db:
+            # Verify the refresh token is still valid
+            async with db.execute(
+                "SELECT 1 FROM refresh_tokens WHERE token = ?",
+                (refresh_token.token,)
+            ) as cursor:
+                if not await cursor.fetchone():
+                    raise ValueError("Invalid refresh token")
 
-        # SECURITY: Invalidate the old access token immediately
-        old_access_token = self.refresh_to_access.get(refresh_token.token)
-        if old_access_token and old_access_token in self.tokens:
-            del self.tokens[old_access_token]
+            # SECURITY: Invalidate the old access token immediately
+            async with db.execute(
+                "SELECT access_token FROM refresh_to_access WHERE refresh_token = ?",
+                (refresh_token.token,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    old_access_token = row[0]
+                    await db.execute("DELETE FROM access_tokens WHERE token = ?", (old_access_token,))
 
-        # Create a new access token
-        new_access_token = f"mcp_{secrets.token_hex(32)}"
-        self.tokens[new_access_token] = AccessToken(
-            token=new_access_token,
-            client_id=client.client_id,
-            subject=refresh_token.subject,
-            scopes=refresh_token.scopes,
-            expires_at=int(time.time()) + 3600,
-            resource=refresh_token.resource,
-        )
+            # Create a new access token
+            new_access_token = f"mcp_{secrets.token_hex(32)}"
+            expires_at = int(time.time()) + 3600
+            await db.execute(
+                """INSERT INTO access_tokens (token, client_id, subject, scopes, expires_at, resource)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (new_access_token, client.client_id, refresh_token.subject,
+                 json.dumps(refresh_token.scopes), expires_at, refresh_token.resource)
+            )
 
-        # SECURITY: Implement refresh token rotation
-        # Create a new refresh token and invalidate the old one
-        new_refresh_token = f"mcp_refresh_{secrets.token_hex(32)}"
-        refresh_token_expiry = int(time.time()) + (90 * 24 * 3600)  # 90 days
+            # SECURITY: Implement refresh token rotation
+            # Create a new refresh token and invalidate the old one
+            new_refresh_token = f"mcp_refresh_{secrets.token_hex(32)}"
+            refresh_token_expiry = int(time.time()) + (90 * 24 * 3600)  # 90 days
 
-        self.refresh_tokens[new_refresh_token] = RefreshToken(
-            token=new_refresh_token,
-            client_id=client.client_id,
-            subject=refresh_token.subject,
-            scopes=refresh_token.scopes,
-            expires_at=refresh_token_expiry,
-            resource=refresh_token.resource,
-        )
+            await db.execute(
+                """INSERT INTO refresh_tokens (token, client_id, subject, scopes, expires_at, resource)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (new_refresh_token, client.client_id, refresh_token.subject,
+                 json.dumps(refresh_token.scopes), refresh_token_expiry, refresh_token.resource)
+            )
 
-        # Update the mapping to the new tokens
-        self.refresh_to_access[new_refresh_token] = new_access_token
+            # Update the mapping to the new tokens
+            await db.execute(
+                "INSERT INTO refresh_to_access (refresh_token, access_token) VALUES (?, ?)",
+                (new_refresh_token, new_access_token)
+            )
 
-        # Invalidate the old refresh token
-        del self.refresh_tokens[refresh_token.token]
-        if refresh_token.token in self.refresh_to_access:
-            del self.refresh_to_access[refresh_token.token]
+            # Invalidate the old refresh token
+            await db.execute("DELETE FROM refresh_tokens WHERE token = ?", (refresh_token.token,))
+            await db.execute("DELETE FROM refresh_to_access WHERE refresh_token = ?", (refresh_token.token,))
+
+            await db.commit()
 
         return OAuthToken(
             access_token=new_access_token,
@@ -274,15 +387,15 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
         )
 
     async def revoke_token(self, token: str, token_type_hint: Optional[str] = None) -> None:
-        # Remove from access tokens
-        if token in self.tokens:
-            del self.tokens[token]
+        async with aiosqlite.connect(self.db_path) as db:
+            # Remove from access tokens
+            await db.execute("DELETE FROM access_tokens WHERE token = ?", (token,))
 
-        # Remove from refresh tokens and clean up mappings
-        if token in self.refresh_tokens:
-            del self.refresh_tokens[token]
-            if token in self.refresh_to_access:
-                del self.refresh_to_access[token]
+            # Remove from refresh tokens and clean up mappings
+            await db.execute("DELETE FROM refresh_tokens WHERE token = ?", (token,))
+            await db.execute("DELETE FROM refresh_to_access WHERE refresh_token = ?", (token,))
+
+            await db.commit()
 
 def _extract_video_id(video_input: str) -> str:
     video_input = video_input.strip()
@@ -464,4 +577,6 @@ async def youtube_list_available_transcripts(video_input: str) -> str:
         return _handle_transcript_error(e, video_input)
 
 if __name__ == "__main__":
+    # Initialize the database before starting the server
+    asyncio.run(init_database())
     mcp.run(transport="sse")
