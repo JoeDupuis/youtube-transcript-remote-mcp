@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Deployment script for YouTube Transcript MCP
 # This script builds and redeploys the application in one shot
