@@ -299,21 +299,12 @@ def _extract_video_id(video_input: str) -> str:
 
     raise ValueError(f"Could not extract valid YouTube video ID from: {video_input}")
 
-def _format_transcript_markdown(transcript_data: List[dict], video_id: str, include_timestamps: bool) -> str:
-    lines = [f"# YouTube Transcript: {video_id}", ""]
-
-    if include_timestamps:
-        for entry in transcript_data:
-            timestamp_seconds = int(entry['start'])
-            minutes = timestamp_seconds // 60
-            seconds = timestamp_seconds % 60
-            timestamp = f"[{minutes:02d}:{seconds:02d}]"
-            lines.append(f"{timestamp} {entry['text']}")
-    else:
-        for entry in transcript_data:
-            lines.append(entry['text'])
-
-    return "\n".join(lines)
+def _format_segment(entry: dict) -> str:
+    """Format a single transcript segment with timestamp."""
+    timestamp_seconds = int(entry['start'])
+    minutes = timestamp_seconds // 60
+    seconds = timestamp_seconds % 60
+    return f"[{minutes:02d}:{seconds:02d}] {entry['text']}"
 
 def _handle_transcript_error(e: Exception, video_id: str) -> str:
     if isinstance(e, TranscriptsDisabled):
@@ -405,18 +396,15 @@ async def youtube_get_transcript(
         metadata_overhead = 150
 
         # Start with header
-        header = f"# YouTube Transcript: {video_id}\n\n"
-        current_size = len(header)
+        result_lines = [f"# YouTube Transcript: {video_id}", ""]
+        current_size = len("\n".join(result_lines)) + 1  # +1 for final newline
 
         # Add segments until we're close to the limit
         segments_added = 0
-        for i, entry in enumerate(remaining_data):
-            # Calculate size of this segment when formatted
-            timestamp_seconds = int(entry['start'])
-            minutes = timestamp_seconds // 60
-            seconds = timestamp_seconds % 60
-            segment_text = f"[{minutes:02d}:{seconds:02d}] {entry['text']}\n"
-            segment_size = len(segment_text)
+        for entry in remaining_data:
+            # Format this segment
+            segment_text = _format_segment(entry)
+            segment_size = len(segment_text) + 1  # +1 for newline
 
             # Check if adding this segment would exceed the limit
             if current_size + segment_size + metadata_overhead > CHARACTER_LIMIT:
@@ -424,12 +412,12 @@ async def youtube_get_transcript(
                 if segments_added > 0:
                     break
 
+            result_lines.append(segment_text)
             current_size += segment_size
             segments_added += 1
 
-        # Format the segments we can include
-        paginated_data = remaining_data[:segments_added]
-        result = _format_transcript_markdown(paginated_data, video_id, True)
+        # Build final result
+        result = "\n".join(result_lines)
 
         # Add metadata
         end_index = cursor + segments_added
