@@ -39,7 +39,6 @@ AUTHORIZED_EMAILS = [email.strip() for email in AUTHORIZED_EMAILS if email.strip
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
-# MCP response size limit
 CHARACTER_LIMIT = 25000
 
 class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]):
@@ -399,43 +398,41 @@ async def youtube_get_transcript(
         if cursor >= total_segments:
             return f"Error: Cursor {cursor} is beyond the end of transcript (total segments: {total_segments})"
 
-        # Try to fit as many segments as possible within CHARACTER_LIMIT
-        # Start with all remaining segments and progressively reduce if needed
+        # Build result by appending segments until we're close to the limit
         remaining_data = transcript_data[cursor:]
 
-        # First try with all remaining segments
-        result = _format_transcript_markdown(remaining_data, video_id, True)
+        # Reserve space for pagination metadata
+        metadata_overhead = 150
 
-        # If it fits, we're done
-        if len(result) <= CHARACTER_LIMIT:
-            result += f"\n\n---\n**Total segments:** {total_segments}"
-            if cursor > 0:
-                result += f" (showing segments {cursor + 1}-{total_segments})"
-            return result
+        # Start with header
+        header = f"# YouTube Transcript: {video_id}\n\n"
+        current_size = len(header)
 
-        # Otherwise, find how many segments fit
-        # Use binary search for efficiency
-        left, right = 1, len(remaining_data)
-        best_count = 1
+        # Add segments until we're close to the limit
+        segments_added = 0
+        for i, entry in enumerate(remaining_data):
+            # Calculate size of this segment when formatted
+            timestamp_seconds = int(entry['start'])
+            minutes = timestamp_seconds // 60
+            seconds = timestamp_seconds % 60
+            segment_text = f"[{minutes:02d}:{seconds:02d}] {entry['text']}\n"
+            segment_size = len(segment_text)
 
-        while left <= right:
-            mid = (left + right) // 2
-            test_data = remaining_data[:mid]
-            test_result = _format_transcript_markdown(test_data, video_id, True)
+            # Check if adding this segment would exceed the limit
+            if current_size + segment_size + metadata_overhead > CHARACTER_LIMIT:
+                # Only stop if we've added at least one segment
+                if segments_added > 0:
+                    break
 
-            # Reserve space for pagination metadata (~150 chars)
-            if len(test_result) + 150 <= CHARACTER_LIMIT:
-                best_count = mid
-                left = mid + 1
-            else:
-                right = mid - 1
+            current_size += segment_size
+            segments_added += 1
 
-        # Build final result with best_count segments
-        paginated_data = remaining_data[:best_count]
+        # Format the segments we can include
+        paginated_data = remaining_data[:segments_added]
         result = _format_transcript_markdown(paginated_data, video_id, True)
 
-        # Add pagination metadata
-        end_index = cursor + best_count
+        # Add metadata
+        end_index = cursor + segments_added
         has_more = end_index < total_segments
 
         result += f"\n\n---\n**Pagination Info:**\n"

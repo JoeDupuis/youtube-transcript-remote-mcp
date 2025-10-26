@@ -94,14 +94,14 @@ For MCP Inspector or other MCP clients, use:
 
 ### 1. `youtube_get_transcript`
 
-Fetches the transcript for a YouTube video with automatic pagination.
+Fetches the transcript for a YouTube video.
 
 **Parameters:**
 - `video_input` (string, required): YouTube video ID or full URL
   - Examples: `dQw4w9WgXcQ` or `https://youtube.com/watch?v=dQw4w9WgXcQ`
 - `cursor` (integer, optional, default: 0): Starting segment index for pagination
 
-**Returns:** Markdown-formatted transcript with timestamps and automatic pagination
+**Returns:** Markdown-formatted transcript with timestamps
 
 **How Pagination Works:**
 - The tool automatically fits as many segments as possible within the MCP response size limit (25,000 characters)
