@@ -374,4 +374,7 @@ async def youtube_list_available_transcripts(video_input: str) -> str:
         return _handle_transcript_error(e, video_input)
 
 if __name__ == "__main__":
-    mcp.run(transport="sse", host="0.0.0.0", port=8000)
+    import os
+    os.environ.setdefault("MCP_HOST", "0.0.0.0")
+    os.environ.setdefault("MCP_PORT", "8000")
+    mcp.run(transport="sse")
