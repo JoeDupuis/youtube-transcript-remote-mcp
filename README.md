@@ -94,26 +94,39 @@ For MCP Inspector or other MCP clients, use:
 
 ### 1. `youtube_get_transcript`
 
-Fetches the transcript for a YouTube video.
+Fetches the transcript for a YouTube video with optional pagination support.
 
 **Parameters:**
 - `video_input` (string, required): YouTube video ID or full URL
   - Examples: `dQw4w9WgXcQ` or `https://youtube.com/watch?v=dQw4w9WgXcQ`
-- `include_timestamps` (boolean, optional, default: true): Include [MM:SS] timestamps
-- `allow_auto_generated` (boolean, optional, default: true): Fall back to auto-generated if manual transcript unavailable
-- `auth_token` (string, required): Google OAuth 2.0 ID token
+- `cursor` (integer, optional, default: 0): Starting segment index for pagination
+- `page_size` (integer, optional, default: null): Number of segments to return per page
+  - If not specified, returns the entire transcript
+  - Useful for handling very long transcripts within MCP response size limits
 
-**Returns:** Markdown-formatted transcript with optional timestamps
+**Returns:** Markdown-formatted transcript with timestamps and pagination metadata
 
-**Example:**
+**Example (full transcript):**
+```json
+{
+  "video_input": "dQw4w9WgXcQ"
+}
+```
+
+**Example (paginated):**
 ```json
 {
   "video_input": "dQw4w9WgXcQ",
-  "include_timestamps": true,
-  "allow_auto_generated": true,
-  "auth_token": "your-google-oauth-token"
+  "cursor": 0,
+  "page_size": 100
 }
 ```
+
+**Pagination Response Format:**
+The response includes pagination metadata:
+- `Showing segments X-Y of Z`: Current page range
+- `Has more`: Whether there are more segments to fetch
+- `Next cursor`: Value to use for the next page (if has_more is true)
 
 ### 2. `youtube_list_available_transcripts`
 
@@ -173,9 +186,9 @@ The server provides clear error messages for common issues:
 ## Limitations
 
 - Currently only supports English transcripts
-- Maximum response size limited to 25,000 characters (automatically truncated with notice)
 - Requires internet connection to fetch transcripts and validate tokens
 - Subject to YouTube's rate limits and availability
+- Very long transcripts should use pagination to stay within MCP response size limits
 
 ## License
 

@@ -39,8 +39,6 @@ AUTHORIZED_EMAILS = [email.strip() for email in AUTHORIZED_EMAILS if email.strip
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
-CHARACTER_LIMIT = 25000
-
 class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]):
 
     def __init__(self, server_url: str):
@@ -362,11 +360,17 @@ async def google_callback_handler(request: Request) -> Response:
         "openWorldHint": True
     }
 )
-async def youtube_get_transcript(video_input: str) -> str:
+async def youtube_get_transcript(
+    video_input: str,
+    cursor: int = 0,
+    page_size: int | None = None
+) -> str:
     """Get YouTube video transcript. Just paste the video URL or ID.
 
     Args:
         video_input: YouTube URL or video ID
+        cursor: Starting segment index for pagination (default: 0)
+        page_size: Number of segments to return per page (default: None = all segments)
     """
     try:
         video_id = _extract_video_id(video_input)
@@ -384,15 +388,35 @@ async def youtube_get_transcript(video_input: str) -> str:
 
         fetched = transcript.fetch()
         transcript_data = fetched.to_raw_data()
+        total_segments = len(transcript_data)
 
-        result = _format_transcript_markdown(transcript_data, video_id, True)
+        # Apply pagination if page_size is specified
+        if page_size is not None:
+            # Validate cursor
+            if cursor < 0:
+                cursor = 0
+            if cursor >= total_segments:
+                return f"Error: Cursor {cursor} is beyond the end of transcript (total segments: {total_segments})"
 
-        if len(result) > CHARACTER_LIMIT:
-            truncated_ratio = CHARACTER_LIMIT / len(result)
-            truncated_count = int(len(transcript_data) * truncated_ratio)
-            truncated_data = transcript_data[:truncated_count]
-            result = _format_transcript_markdown(truncated_data, video_id, True)
-            result += f"\n\n⚠️ **Transcript truncated**: Showing {truncated_count}/{len(transcript_data)} segments due to length limits."
+            # Calculate the slice
+            end_index = min(cursor + page_size, total_segments)
+            paginated_data = transcript_data[cursor:end_index]
+            has_more = end_index < total_segments
+            next_cursor = end_index if has_more else None
+
+            # Format the paginated transcript
+            result = _format_transcript_markdown(paginated_data, video_id, True)
+
+            # Add pagination metadata
+            result += f"\n\n---\n**Pagination Info:**\n"
+            result += f"- Showing segments {cursor + 1}-{end_index} of {total_segments}\n"
+            result += f"- Has more: {has_more}\n"
+            if has_more:
+                result += f"- Next cursor: {next_cursor}\n"
+        else:
+            # Return full transcript if no pagination
+            result = _format_transcript_markdown(transcript_data, video_id, True)
+            result += f"\n\n---\n**Total segments:** {total_segments}"
 
         return result
 
