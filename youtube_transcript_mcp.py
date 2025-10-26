@@ -245,6 +245,8 @@ oauth_provider = GoogleOAuthProvider(SERVER_URL)
 
 mcp = FastMCP(
     "youtube_transcript_mcp",
+    host="0.0.0.0",
+    port=8000,
     auth_server_provider=oauth_provider,
     auth=AuthSettings(
         issuer_url=AnyHttpUrl(SERVER_URL),
@@ -374,7 +376,4 @@ async def youtube_list_available_transcripts(video_input: str) -> str:
         return _handle_transcript_error(e, video_input)
 
 if __name__ == "__main__":
-    import os
-    os.environ.setdefault("MCP_HOST", "0.0.0.0")
-    os.environ.setdefault("MCP_PORT", "8000")
     mcp.run(transport="sse")
