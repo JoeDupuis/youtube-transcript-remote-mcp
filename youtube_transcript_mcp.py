@@ -357,9 +357,9 @@ async def youtube_get_transcript(
     video_input: str,
     cursor: int = 0
 ) -> str:
-    """Get YouTube video transcript. Just paste the video URL or ID.
+    """Get YouTube video transcript. Pass the video URL or ID.
 
-    Automatically paginates if transcript exceeds MCP response size limits.
+    The output is paginated and will require multiple calls to fetch the whole transcript.
 
     Args:
         video_input: YouTube URL or video ID
