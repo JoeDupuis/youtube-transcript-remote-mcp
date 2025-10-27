@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 
 echo "Starting YouTube Transcript MCP with CloudFlare WARP support..."
