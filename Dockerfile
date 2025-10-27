@@ -23,8 +23,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY youtube_transcript_mcp.py .
 COPY start.sh .
 
-# Make startup script executable
-RUN chmod +x start.sh
+# Make startup script executable and verify it exists
+RUN chmod +x start.sh && ls -la /app/start.sh && head -1 /app/start.sh
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1
@@ -33,4 +33,4 @@ ENV ENABLE_WARP=true
 EXPOSE 8000
 
 # Use the startup script that initializes WARP and then starts the app
-CMD ["/app/start.sh"]
+CMD ["bash", "/app/start.sh"]
