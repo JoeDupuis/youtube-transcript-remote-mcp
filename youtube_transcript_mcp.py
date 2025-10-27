@@ -32,10 +32,16 @@ from google.auth.transport import requests
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from starlette.routing import Route
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, RedirectResponse, Response
+from starlette.responses import HTMLResponse, RedirectResponse, Response, JSONResponse
 from starlette.exceptions import HTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
+import logging
 
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 AUTHORIZED_EMAILS = os.getenv("AUTHORIZED_EMAILS", "").split(",")
 AUTHORIZED_EMAILS = [email.strip() for email in AUTHORIZED_EMAILS if email.strip()]
@@ -43,6 +49,48 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
 CHARACTER_LIMIT = 25000
+
+class DebugLoggingMiddleware(BaseHTTPMiddleware):
+    """Middleware to log registration requests for debugging."""
+
+    async def dispatch(self, request: Request, call_next):
+        # Only log registration requests
+        if request.url.path == "/register":
+            logger.info(f"=== REGISTRATION REQUEST DEBUG ===")
+            logger.info(f"Method: {request.method}")
+            logger.info(f"Headers: {dict(request.headers)}")
+            logger.info(f"Query params: {dict(request.query_params)}")
+
+            # Read and log the body
+            body = await request.body()
+            logger.info(f"Body (raw bytes): {body}")
+            logger.info(f"Body (decoded): {body.decode('utf-8', errors='replace')}")
+
+            # Parse JSON to see the structure
+            try:
+                import json as json_module
+                body_json = json_module.loads(body)
+                logger.info(f"Body (parsed JSON): {json_module.dumps(body_json, indent=2)}")
+            except Exception as e:
+                logger.error(f"Failed to parse body as JSON: {e}")
+
+            # Reconstruct the request with the body for downstream handlers
+            async def receive():
+                return {"type": "http.request", "body": body}
+
+            request._receive = receive
+            logger.info(f"=== END REGISTRATION REQUEST DEBUG ===")
+
+        response = await call_next(request)
+
+        # Log the response for registration requests
+        if request.url.path == "/register":
+            logger.info(f"=== REGISTRATION RESPONSE DEBUG ===")
+            logger.info(f"Status: {response.status_code}")
+            logger.info(f"Headers: {dict(response.headers)}")
+            logger.info(f"=== END REGISTRATION RESPONSE DEBUG ===")
+
+        return response
 
 async def init_database(db_path: str = "oauth_tokens.db"):
     """Initialize the SQLite database with required tables."""
@@ -426,6 +474,23 @@ mcp = FastMCP(
         resource_server_url=None,
     )
 )
+
+# Add debug logging middleware
+mcp.app.add_middleware(DebugLoggingMiddleware)
+
+# Add exception handler for better error logging
+@mcp.app.exception_handler(Exception)
+async def log_exceptions(request: Request, exc: Exception):
+    """Log exceptions for debugging."""
+    if request.url.path == "/register":
+        logger.error(f"=== REGISTRATION EXCEPTION ===")
+        logger.error(f"Exception type: {type(exc).__name__}")
+        logger.error(f"Exception message: {str(exc)}")
+        logger.error(f"Exception details:", exc_info=exc)
+        logger.error(f"=== END REGISTRATION EXCEPTION ===")
+
+    # Re-raise to let the default handler process it
+    raise exc
 
 @mcp.custom_route("/google/callback", methods=["GET"])
 async def google_callback_handler(request: Request) -> Response:
