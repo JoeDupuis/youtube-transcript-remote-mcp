@@ -33,4 +33,4 @@ ENV ENABLE_WARP=true
 EXPOSE 8000
 
 # Use the startup script that initializes WARP and then starts the app
-CMD ["./start.sh"]
+CMD ["/app/start.sh"]
