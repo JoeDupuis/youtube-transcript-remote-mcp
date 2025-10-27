@@ -113,7 +113,7 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 "INSERT OR REPLACE INTO clients (client_id, client_data) VALUES (?, ?)",
-                (client_info.client_id, json.dumps(client_info.model_dump()))
+                (client_info.client_id, json.dumps(client_info.model_dump(mode='json')))
             )
             await db.commit()
 
