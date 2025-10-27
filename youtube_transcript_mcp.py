@@ -18,6 +18,7 @@ from mcp.server.auth.provider import (
     RefreshToken,
     AuthorizationParams,
     construct_redirect_uri,
+    RegistrationError,
 )
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.auth.routes import create_auth_routes
@@ -29,11 +30,14 @@ from youtube_transcript_api._errors import (
 )
 from google.oauth2 import id_token
 from google.auth.transport import requests
-from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from mcp.shared.auth import OAuthClientInformationFull, OAuthToken, OAuthClientMetadata
+from mcp.server.auth.json_response import PydanticJSONResponse
 from starlette.routing import Route
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, RedirectResponse, Response
+from starlette.responses import HTMLResponse, RedirectResponse, Response, JSONResponse
 from starlette.exceptions import HTTPException
+from pydantic import BaseModel, ValidationError
+from uuid import uuid4
 
 load_dotenv()
 
@@ -430,6 +434,84 @@ mcp = FastMCP(
 @mcp.custom_route("/google/callback", methods=["GET"])
 async def google_callback_handler(request: Request) -> Response:
     return await oauth_provider.handle_google_callback(request)
+
+class RegistrationErrorResponse(BaseModel):
+    error: str
+    error_description: str | None
+
+@mcp.custom_route("/register", methods=["POST"])
+async def custom_register_handler(request: Request) -> Response:
+    """Custom registration handler with relaxed grant_types validation for Perplexity compatibility."""
+    try:
+        body = await request.json()
+        client_metadata = OAuthClientMetadata.model_validate(body)
+    except ValidationError as validation_error:
+        return PydanticJSONResponse(
+            content=RegistrationErrorResponse(
+                error="invalid_client_metadata",
+                error_description=str(validation_error),
+            ),
+            status_code=400,
+        )
+
+    # Relaxed grant_types validation: only require authorization_code
+    grant_types_set = set(client_metadata.grant_types)
+    if "authorization_code" not in grant_types_set:
+        return PydanticJSONResponse(
+            content=RegistrationErrorResponse(
+                error="invalid_client_metadata",
+                error_description="grant_types must include authorization_code",
+            ),
+            status_code=400,
+        )
+
+    # Validate response_types
+    if "code" not in client_metadata.response_types:
+        return PydanticJSONResponse(
+            content=RegistrationErrorResponse(
+                error="invalid_client_metadata",
+                error_description="response_types must include 'code' for authorization_code grant",
+            ),
+            status_code=400,
+        )
+
+    # Generate client credentials
+    client_id = str(uuid4())
+    client_secret = None
+    if client_metadata.token_endpoint_auth_method != "none":
+        client_secret = secrets.token_hex(32)
+
+    # Handle scopes
+    if client_metadata.scope is None:
+        client_metadata.scope = "youtube_transcript"
+
+    client_id_issued_at = int(time.time())
+
+    client_info = OAuthClientInformationFull(
+        client_id=client_id,
+        client_id_issued_at=client_id_issued_at,
+        client_secret=client_secret,
+        client_secret_expires_at=None,
+        redirect_uris=client_metadata.redirect_uris,
+        token_endpoint_auth_method=client_metadata.token_endpoint_auth_method,
+        grant_types=client_metadata.grant_types,
+        response_types=client_metadata.response_types,
+        client_name=client_metadata.client_name,
+        client_uri=client_metadata.client_uri,
+        logo_uri=client_metadata.logo_uri,
+        scope=client_metadata.scope,
+        contacts=client_metadata.contacts,
+        tos_uri=client_metadata.tos_uri,
+        policy_uri=client_metadata.policy_uri,
+        jwks_uri=client_metadata.jwks_uri,
+        jwks=client_metadata.jwks,
+        software_id=client_metadata.software_id,
+        software_version=client_metadata.software_version,
+    )
+
+    await oauth_provider.register_client(client_info)
+
+    return PydanticJSONResponse(content=client_info, status_code=201)
 
 @mcp.tool(
     name="youtube_get_transcript",
