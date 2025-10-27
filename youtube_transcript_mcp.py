@@ -179,7 +179,7 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
             auth_code = AuthorizationCode(
                 code=mcp_code,
                 client_id=state_data["client_id"],
-                redirect_uri=AnyHttpUrl(state_data["redirect_uri"]),
+                redirect_uri=state_data["redirect_uri"],
                 redirect_uri_provided_explicitly=state_data["redirect_uri_provided_explicitly"],
                 expires_at=time.time() + 300,
                 scopes=["youtube_transcript"],
