@@ -2,6 +2,7 @@
 
 # Deployment script for YouTube Transcript MCP
 # This script builds and redeploys the application in one shot
+# Usage: ./deploy.sh [--no-cache]
 
 set -e  # Exit on error
 
@@ -11,11 +12,18 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Parse arguments
+BUILD_ARGS=""
+if [ "$1" = "--no-cache" ]; then
+    BUILD_ARGS="--no-cache"
+    echo -e "${YELLOW}Building with --no-cache flag${NC}"
+fi
+
 echo -e "${YELLOW}Starting deployment...${NC}"
 
 # Step 1: Build the Docker image
 echo -e "\n${YELLOW}Step 1: Building Docker image...${NC}"
-docker compose build
+docker compose build $BUILD_ARGS
 
 # Step 2: Stop and remove existing containers
 echo -e "\n${YELLOW}Step 2: Stopping existing containers...${NC}"
