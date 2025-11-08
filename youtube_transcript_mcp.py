@@ -8,6 +8,7 @@ import time
 import json
 import asyncio
 import aiosqlite
+import subprocess
 from dotenv import load_dotenv
 from pydantic import AnyHttpUrl
 from mcp.server.fastmcp import FastMCP
@@ -43,6 +44,46 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
 CHARACTER_LIMIT = 25000
+
+# CloudFlare WARP configuration
+ENABLE_WARP = os.getenv("ENABLE_WARP", "true").lower() == "true"
+WARP_SOCKS5_PROXY = "socks5://127.0.0.1:40000"
+
+# Configure proxy for requests library (used by youtube-transcript-api)
+if ENABLE_WARP:
+    os.environ["HTTP_PROXY"] = WARP_SOCKS5_PROXY
+    os.environ["HTTPS_PROXY"] = WARP_SOCKS5_PROXY
+    os.environ["ALL_PROXY"] = WARP_SOCKS5_PROXY
+
+def restart_warp():
+    """Restart WARP connection to potentially get a new IP address."""
+    if not ENABLE_WARP:
+        return False
+
+    try:
+        print("Restarting WARP connection to get new IP...")
+        # Disconnect
+        subprocess.run(["warp-cli", "disconnect"], capture_output=True, timeout=10)
+        time.sleep(1)
+        # Reconnect
+        subprocess.run(["warp-cli", "connect"], capture_output=True, timeout=10)
+        # Wait for connection
+        for _ in range(15):
+            result = subprocess.run(
+                ["warp-cli", "status"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if "Connected" in result.stdout:
+                print("✓ WARP reconnected successfully")
+                return True
+            time.sleep(1)
+        print("⚠ WARP reconnection timed out")
+        return False
+    except Exception as e:
+        print(f"⚠ Failed to restart WARP: {e}")
+        return False
 
 async def init_database(db_path: str = "oauth_tokens.db"):
     """Initialize the SQLite database with required tables."""
@@ -151,7 +192,13 @@ class GoogleOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
             raise HTTPException(400, "Invalid state")
 
         import httpx
-        token_response = await httpx.AsyncClient().post(
+
+        # Configure httpx client with WARP proxy if enabled
+        client_kwargs = {}
+        if ENABLE_WARP:
+            client_kwargs["proxies"] = WARP_SOCKS5_PROXY
+
+        token_response = await httpx.AsyncClient(**client_kwargs).post(
             "https://oauth2.googleapis.com/token",
             data={
                 "code": code,
@@ -406,6 +453,57 @@ def _handle_transcript_error(e: Exception, video_id: str) -> str:
     else:
         return f"Error: Unexpected error occurred: {type(e).__name__}: {str(e)}"
 
+def _is_rate_limit_error(e: Exception) -> bool:
+    """Check if an error might be due to rate limiting or IP blocking."""
+    error_msg = str(e).lower()
+    rate_limit_indicators = [
+        "too many requests",
+        "rate limit",
+        "429",
+        "503",
+        "connection",
+        "timeout",
+        "http error",
+        "network"
+    ]
+    return any(indicator in error_msg for indicator in rate_limit_indicators)
+
+def retry_with_warp_reconnect(max_retries: int = 3):
+    """Decorator to retry function with WARP reconnection on rate limit errors."""
+    def decorator(func):
+        async def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+
+                    # If it's not a rate limit error, don't retry
+                    if not _is_rate_limit_error(e):
+                        raise
+
+                    # If this is the last attempt, raise the error
+                    if attempt == max_retries - 1:
+                        raise
+
+                    # Try to restart WARP and retry
+                    print(f"⚠ Potential rate limit error (attempt {attempt + 1}/{max_retries}): {e}")
+                    if ENABLE_WARP:
+                        print("Attempting WARP reconnection...")
+                        restart_warp()
+                        await asyncio.sleep(2)  # Wait a bit before retrying
+                    else:
+                        print("WARP is disabled, retrying without reconnection...")
+                        await asyncio.sleep(5)  # Longer wait if no WARP
+
+            # This should never be reached, but just in case
+            if last_exception:
+                raise last_exception
+
+        return wrapper
+    return decorator
+
 SERVER_URL = os.getenv("SERVER_URL", "http://localhost:8000")
 
 oauth_provider = GoogleOAuthProvider(SERVER_URL)
@@ -441,6 +539,7 @@ async def google_callback_handler(request: Request) -> Response:
         "openWorldHint": True
     }
 )
+@retry_with_warp_reconnect(max_retries=3)
 async def youtube_get_transcript(
     video_input: str,
     cursor: int = 0
@@ -532,6 +631,7 @@ async def youtube_get_transcript(
         "openWorldHint": True
     }
 )
+@retry_with_warp_reconnect(max_retries=3)
 async def youtube_list_available_transcripts(video_input: str) -> str:
     """List available transcripts for a YouTube video.
 

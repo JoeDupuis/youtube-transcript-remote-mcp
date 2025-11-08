@@ -10,6 +10,8 @@ An MCP (Model Context Protocol) server that provides YouTube transcript fetching
 - List available transcripts for any video
 - Google OAuth 2.0 authentication with email-based authorization
 - Automatic video ID extraction from various YouTube URL formats
+- **CloudFlare WARP integration to prevent IP bans** - Routes all requests through CloudFlare's network
+- Automatic retry with IP rotation on rate limit errors
 
 ## Installation
 
@@ -56,6 +58,113 @@ AUTHORIZED_EMAILS=user1@gmail.com,user2@example.com
 
 - `GOOGLE_CLIENT_ID`: Your OAuth 2.0 client ID from Google Cloud Console
 - `AUTHORIZED_EMAILS`: Comma-separated list of email addresses allowed to use the service
+
+## CloudFlare WARP Integration
+
+This server includes built-in CloudFlare WARP support to prevent IP-based rate limiting and bans from Google/YouTube. WARP routes all HTTP requests through CloudFlare's global network, masking your real server IP.
+
+### How It Works
+
+```
+Your Server → WARP Client → CloudFlare Network → Google/YouTube
+(Real IP)    (SOCKS5 Proxy)  (CloudFlare IPs)   (Sees CF IP)
+```
+
+**Benefits:**
+- ✅ Google sees CloudFlare's IPs instead of your real server IP
+- ✅ Automatic IP rotation through CloudFlare's network
+- ✅ No CloudFlare account or dashboard setup required (uses free public WARP)
+- ✅ Automatic retry with WARP reconnection on rate limit errors
+- ✅ Better rate limits (CloudFlare IPs are trusted by Google)
+
+### Configuration
+
+WARP is **enabled by default**. You can control it with the `ENABLE_WARP` environment variable:
+
+```env
+# Enable WARP (default)
+ENABLE_WARP=true
+
+# Disable WARP (use direct connections)
+ENABLE_WARP=false
+```
+
+### How It Prevents IP Bans
+
+1. **IP Masking**: All requests appear to come from CloudFlare's network, not your server
+2. **Automatic Rotation**: WARP periodically rotates exit IPs based on CloudFlare's routing
+3. **Retry Logic**: If a rate limit error occurs:
+   - The server automatically reconnects to WARP (getting a likely different IP)
+   - Retries the request up to 3 times
+   - If still blocked, returns an error
+
+### Manual IP Change
+
+If you need to manually change the IP (e.g., if Google blocks one CloudFlare IP):
+
+```bash
+# Restart the container to reconnect WARP with a new IP
+docker-compose restart youtube-transcript-mcp
+
+# Or use docker restart
+docker restart youtube-transcript-remote-mcp-youtube-transcript-mcp-1
+```
+
+Inside the container, you can also manually restart WARP:
+
+```bash
+docker exec -it youtube-transcript-remote-mcp-youtube-transcript-mcp-1 bash
+warp-cli disconnect
+warp-cli connect
+warp-cli status
+```
+
+### Monitoring WARP
+
+Check WARP status in the container logs:
+
+```bash
+docker-compose logs -f youtube-transcript-mcp
+```
+
+You should see:
+```
+Starting YouTube Transcript MCP with CloudFlare WARP support...
+CloudFlare WARP is enabled. Setting up WARP...
+Starting WARP daemon...
+Registering WARP client...
+Connecting to WARP...
+✓ WARP connected successfully!
+✓ WARP setup complete!
+All traffic will be routed through CloudFlare WARP
+```
+
+### Disabling WARP
+
+If you want to disable WARP and use direct connections:
+
+1. Set `ENABLE_WARP=false` in your `.env` file or `docker-compose.yml`
+2. Rebuild and restart: `docker-compose up -d --build`
+
+### Requirements
+
+- Docker with `NET_ADMIN` and `SYS_MODULE` capabilities (already configured in `docker-compose.yml`)
+- No CloudFlare account needed for basic usage
+- IPv6 support (enabled automatically in the container)
+
+### Advanced: CloudFlare Teams (Optional)
+
+For enterprise features like usage analytics, custom policies, and device management:
+
+1. Create a [CloudFlare Zero Trust account](https://dash.teams.cloudflare.com/) (free for up to 50 users)
+2. Get your Teams enrollment token from the dashboard
+3. Add to `.env`:
+   ```env
+   WARP_TEAMS_ENROLLMENT_TOKEN=your-token-here
+   ```
+4. Modify `start.sh` to use: `warp-cli teams-enroll ${WARP_TEAMS_ENROLLMENT_TOKEN}`
+
+**Note**: For basic IP masking and preventing bans, the free public WARP is sufficient.
 
 ## Running the Server
 
@@ -188,8 +297,9 @@ The server provides clear error messages for common issues:
 
 - Currently only supports English transcripts
 - Requires internet connection to fetch transcripts and validate tokens
-- Subject to YouTube's rate limits and availability
+- Subject to YouTube's rate limits and availability (mitigated by CloudFlare WARP)
 - Very long transcripts should use pagination to stay within MCP response size limits
+- WARP requires Docker capabilities: NET_ADMIN and SYS_MODULE (already configured)
 
 ## License
 

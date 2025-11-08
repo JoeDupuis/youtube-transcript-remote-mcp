@@ -1,30 +1,3 @@
-FROM python:3.11-slim
-
-WORKDIR /app
-
-# Install CloudFlare WARP and dependencies
-RUN apt-get update && apt-get install -y \
-    curl \
-    gnupg \
-    lsb-release \
-    ca-certificates \
-    && curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list \
-    && apt-get update \
-    && apt-get install -y cloudflare-warp \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application files
-COPY youtube_transcript_mcp.py .
-
-# Create startup script directly in the image
-RUN cat > /usr/local/bin/start-warp.sh << 'EOFSCRIPT' && chmod +x /usr/local/bin/start-warp.sh \
-&& cat /usr/local/bin/start-warp.sh
 #!/usr/bin/env bash
 set -e
 
@@ -87,46 +60,21 @@ if [ "$ENABLE_WARP" = "true" ]; then
         exit 1
     fi
 
-    # Export proxy environment variables
+    # Show WARP settings
+    echo "WARP Settings:"
+    warp-cli --accept-tos settings 2>/dev/null || echo "Unable to get WARP settings"
+
+    # Export proxy environment variables for processes that don't use explicit proxy config
     export ALL_PROXY=socks5://127.0.0.1:40000
     export HTTP_PROXY=socks5://127.0.0.1:40000
     export HTTPS_PROXY=socks5://127.0.0.1:40000
 
     echo "✓ WARP setup complete!"
     echo "All traffic will be routed through CloudFlare WARP"
-
-    # Test and display the external IP
-    echo ""
-    echo "Testing WARP connection - Checking external IP..."
-    EXTERNAL_IP=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null || echo "Unable to fetch")
-    echo "External IP (via WARP): $EXTERNAL_IP"
-
-    # Also show CloudFlare trace for more details
-    echo ""
-    echo "CloudFlare trace info:"
-    curl -s --max-time 10 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -E "^(ip|loc|warp)" || echo "Unable to fetch trace"
-    echo ""
 else
     echo "CloudFlare WARP is disabled. Running without proxy..."
-
-    # Show real IP when WARP is disabled for comparison
-    echo ""
-    echo "Testing direct connection - Checking external IP..."
-    EXTERNAL_IP=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null || echo "Unable to fetch")
-    echo "External IP (direct): $EXTERNAL_IP"
-    echo ""
 fi
 
 # Start the Python application
 echo "Starting YouTube Transcript MCP server..."
 exec python youtube_transcript_mcp.py
-EOFSCRIPT
-
-# Environment variables
-ENV PYTHONUNBUFFERED=1
-ENV ENABLE_WARP=true
-
-EXPOSE 8000
-
-# Use the startup script
-CMD ["/usr/local/bin/start-warp.sh"]

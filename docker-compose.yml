@@ -12,11 +12,20 @@ services:
       - AUTHORIZED_EMAILS=${AUTHORIZED_EMAILS}
       - UVICORN_HOST=0.0.0.0
       - UVICORN_PORT=8000
+      - ENABLE_WARP=${ENABLE_WARP:-true}
     env_file:
       - .env
     volumes:
       - oauth_data:/app
+      - warp_data:/var/lib/cloudflare-warp
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv4.conf.all.src_valid_mark=1
     restart: unless-stopped
 
 volumes:
   oauth_data:
+  warp_data:
