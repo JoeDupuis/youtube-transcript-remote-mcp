@@ -94,8 +94,27 @@ if [ "$ENABLE_WARP" = "true" ]; then
 
     echo "✓ WARP setup complete!"
     echo "All traffic will be routed through CloudFlare WARP"
+
+    # Test and display the external IP
+    echo ""
+    echo "Testing WARP connection - Checking external IP..."
+    EXTERNAL_IP=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null || echo "Unable to fetch")
+    echo "External IP (via WARP): $EXTERNAL_IP"
+
+    # Also show CloudFlare trace for more details
+    echo ""
+    echo "CloudFlare trace info:"
+    curl -s --max-time 10 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -E "^(ip|loc|warp)" || echo "Unable to fetch trace"
+    echo ""
 else
     echo "CloudFlare WARP is disabled. Running without proxy..."
+
+    # Show real IP when WARP is disabled for comparison
+    echo ""
+    echo "Testing direct connection - Checking external IP..."
+    EXTERNAL_IP=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null || echo "Unable to fetch")
+    echo "External IP (direct): $EXTERNAL_IP"
+    echo ""
 fi
 
 # Start the Python application
